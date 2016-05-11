@@ -9,47 +9,27 @@ import (
 	"net/url"
 )
 
-
-func jasHandler(w http.ResponseWriter, r *http.Request) {
-	echoRequestServer := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintln(w, r)
-			}))
-	defer echoRequestServer.Close()
-
-	echoHostServer := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintln(w, r.Host)
-			}))
-	defer echoHostServer.Close()
-
-	requestURL, err := url.Parse(echoRequestServer.URL)
-	if err != nil {
-		log.Fatal(err)
-	}
-	hostURL, err := url.Parse(echoHostServer.URL)
-	if err != nil {
-		log.Fatal(err)
+func fixedJbmMicroBackend(r *http.Request) *url.URL {
+	switch r.Host {
+	case "general.show":
+		r.URL.Host = "localhost:8000"
+	case "jessebmiller.com":
+		r.URL.Host = "localhost:8001"
+	default:
+		r.URL.Host = "localhost:8001"
 	}
 
-	requestProxy := httputil.NewSingleHostReverseProxy(requestURL)
-	hostProxy := httputil.NewSingleHostReverseProxy(hostURL)
-
-	fmt.Println(r.URL)
-	if r.URL.Path == "/host" {
-		hostProxy.ServeHTTP(w, r)
-	} else {
-		requestProxy.ServeHTTP(w, r)
-	}
+	return r.URL
 }
 
+func jasHandler(w http.ResponseWriter, r *http.Request) {
+	proxyURL := fixedJbmMicroBackend(r)
+	proxy := httputil.NewSingleHostReverseProxy(proxyURL)
+	proxy.ServeHTTP(w, r)
+	fmt.Println(r.URL, proxyURL)
+}
 
 func main() {
 	fmt.Println("This is Jasprox.")
-
-	log.Fatal(http.ListenAndServe(":8000", http.HandlerFunc(jasHandler)))
-
-	fmt.Println("Goodbye.")
+	log.Fatal(http.ListenAndServe(":80", http.HandlerFunc(jasHandler)))
 }
