@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
-	"net/http/httptest"
 	"net/url"
 )
 
