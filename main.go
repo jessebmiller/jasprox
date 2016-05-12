@@ -2,26 +2,66 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 )
 
 
-const USE_STRAT string = "environ"
+const USE_STRAT string = "file"
 var STRATS = map[string]func(*http.Request) (*url.URL, error){
 
 	"environ": environStrategy,
+	"file": fileStrategy,
 
-	"justJesse": func(r *http.Request) (*url.URL, error) {
-		return url.Parse("http://jessebmiller.com:8000")
-	},
 }
 
 
+// fileStrategy reads proxy rules from /jasprox.conf
+func fileStrategy(r *http.Request) (*url.URL, error) {
+	configFile, err := os.Open("/jasprox.conf")
+	if err != nil {
+		fmt.Println("ERROR: Could not open file /jasprox.conf")
+		return nil, err
+	}
+	defer configFile.Close()
+
+	splitStatement := func (s string) (string, string) {
+		statementSlice := strings.Split(s, " ")
+		return statementSlice[0], statementSlice[1]
+	}
+
+	configScanner := bufio.NewScanner(configFile)
+	for configScanner.Scan() {
+		downstream, upstream := splitStatement(configScanner.Text())
+		if downstream == r.Host {
+			fmt.Println(
+				"found proxy rule:",
+				downstream,
+				"->",
+				upstream,
+			)
+			return url.Parse(upstream)
+		}
+	}
+
+	if err := configScanner.Err(); err != nil {
+		fmt.Println("ERROR: Could not scan config file")
+		return nil, err
+	}
+
+	return nil, errors.New(
+		"ERROR: fileStrategy could not find matching upstream")
+}
+
+
+// environStrategy reads proxy rules from environment variables
 func environStrategy(r *http.Request) (*url.URL, error) {
 	return url.Parse(os.Getenv("PROXY_URL"))
 }
