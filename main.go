@@ -3,7 +3,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,83 +10,92 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
+var suppliers = map[string]func()map[string]*url.URL{
 
-const USE_STRAT string = "file"
-var STRATS = map[string]func(*http.Request) (*url.URL, error){
+	"fileSupplier": func () map[string]*url.URL {
+		configFile, err := os.Open("/jasprox.conf")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer configFile.Close()
 
-	"environ": environStrategy,
-	"file": fileStrategy,
+		splitStatement := func (s string) (string, string) {
+			statementSlice := strings.Split(s, " ")
+			return statementSlice[0], statementSlice[1]
+		}
 
+		configScanner := bufio.NewScanner(configFile)
+		upstreamMap := make(map[string]*url.URL)
+		for configScanner.Scan() {
+			d, u := splitStatement(configScanner.Text())
+			upstreamMap[d], err = url.Parse(u)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		if err := configScanner.Err(); err != nil {
+			log.Fatal(err)
+		}
+
+		return upstreamMap
+	},
 }
 
+// makeJasprox makes a new proxy handler.
+func makeJasprox() func (http.ResponseWriter, *http.Request) {
 
-// fileStrategy reads proxy rules from /jasprox.conf
-func fileStrategy(r *http.Request) (*url.URL, error) {
-	configFile, err := os.Open("/jasprox.conf")
-	if err != nil {
-		fmt.Println("ERROR: Could not open file /jasprox.conf")
-		return nil, err
-	}
-	defer configFile.Close()
-
-	splitStatement := func (s string) (string, string) {
-		statementSlice := strings.Split(s, " ")
-		return statementSlice[0], statementSlice[1]
-	}
-
-	configScanner := bufio.NewScanner(configFile)
-	for configScanner.Scan() {
-		downstream, upstream := splitStatement(configScanner.Text())
-		if downstream == r.Host {
-			fmt.Println(
-				"found proxy rule:",
-				downstream,
-				"->",
-				upstream,
-			)
-			return url.Parse(upstream)
+	// supplyUpstreams makes an upstream map every second and sends it to
+	// the upstreamMaps channel.
+	supplyUpstreams := func(upstreamMaps chan map[string]*url.URL,
+		                supplierFunc func()map[string]*url.URL) {
+		for {
+			upMap := supplierFunc()
+			upstreamMaps <- upMap
+			time.Sleep(3 * time.Second)
 		}
 	}
 
-	if err := configScanner.Err(); err != nil {
-		fmt.Println("ERROR: Could not scan config file")
-		return nil, err
+	upstreamMaps := make(chan map[string]*url.URL)
+	supplierFunc := suppliers["fileSupplier"]
+	go supplyUpstreams(upstreamMaps, supplierFunc)
+
+	// proxyRequests recieves requests and sends proxies based on the
+	// curent upstream map
+	proxyRequests := func(requests chan *http.Request,
+		              upMaps chan map[string]*url.URL,
+		              proxies chan *httputil.ReverseProxy) {
+		upMap := <-upMaps
+		for {
+			select {
+			case r := <-requests:
+				u := upMap[r.Host]
+				proxy := httputil.NewSingleHostReverseProxy(u)
+				proxies <- proxy
+			case newUpMap := <-upMaps:
+				upMap = newUpMap
+			}
+		}
 	}
 
-	return nil, errors.New(
-		"ERROR: fileStrategy could not find matching upstream")
-}
+	requests := make(chan *http.Request)
+	proxies := make(chan *httputil.ReverseProxy)
+	go proxyRequests(requests, upstreamMaps, proxies)
 
-
-// environStrategy reads proxy rules from environment variables
-func environStrategy(r *http.Request) (*url.URL, error) {
-	return url.Parse(os.Getenv("PROXY_URL"))
-}
-
-
-// whichUrl chooses which url the request should proxy to, or returns an error
-func whichUrl(r *http.Request) (*url.URL, error) {
-	return STRATS[USE_STRAT](r)
-}
-
-
-// serveProxy chooses a url then proxies the request, or responds not found.
-func serveProxy(w http.ResponseWriter, r *http.Request) {
-	proxyUrl, err := whichUrl(r)
-	if err != nil {
-		fmt.Println(err)
-		http.NotFound(w, r)
-	} else {
-		proxy := httputil.NewSingleHostReverseProxy(proxyUrl)
+	// handler puts requests onto the requests channel, pulls proxies off
+	// the proxies channel
+	return func (w http.ResponseWriter, r *http.Request) {
+		requests <- r
+		proxy := <-proxies
 		proxy.ServeHTTP(w, r)
 	}
 }
 
-
 func main() {
 	fmt.Println("This is Jasprox.")
-	proxyHandler := http.HandlerFunc(serveProxy)
-	log.Fatal(http.ListenAndServe(":80", proxyHandler))
+	jasproxHandler := http.HandlerFunc(makeJasprox())
+	log.Fatal(http.ListenAndServe(":80", jasproxHandler))
 }
